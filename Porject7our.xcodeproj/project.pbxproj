@@ -6,8 +6,13 @@
 	objectVersion = 90;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		E301705D308D739F00AB380A /* Home.swift in Sources */ = {isa = PBXBuildFile; fileRef = E301705C308D739F00AB380A /* Home.swift */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		000000000000000000000120 /* Porject7our.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Porject7our.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E301705C308D739F00AB380A /* Home.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Home.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -30,6 +35,7 @@
 		000000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
+				E301705C308D739F00AB380A /* Home.swift */,
 				000000000000000000000010 /* myPage */,
 				000000000000000000000020 /* Products */,
 			);
@@ -110,6 +116,7 @@
 		000000000000000120000000 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			files = (
+				E301705D308D739F00AB380A /* Home.swift in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */
