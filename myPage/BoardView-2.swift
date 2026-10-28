@@ -1,3 +1,9 @@
+//
+//  ChallengeView.swift
+//  MyApp
+//
+//  Created by Mashael on 16/05/1448 AH.
+//
 
 import SwiftUI
 import Combine
@@ -20,11 +26,15 @@ extension Color {
 }
 
 // MARK: - Models
+/// Points you get for every finished challenge
+enum Points { static let perChallenge = 5 }
+
 struct Note: Codable, Identifiable, Hashable {
     let id: String
     let text: String
     let ts: Int
     var shared: Bool
+    var challenge: String? = nil              // set when this note is a "did a challenge" notification
 }
 
 struct Friend: Codable, Identifiable {
@@ -32,6 +42,7 @@ struct Friend: Codable, Identifiable {
     var name: String
     var token: String                         // secret from his QR (proves we scanned him)
     var notes: [String: Note] = [:]           // last synced shared notes
+    var score: Int? = nil                     // his last synced score
     var sortedNotes: [Note] { notes.values.sorted { $0.ts > $1.ts } }
 }
 
@@ -43,12 +54,13 @@ private struct QRPayload: Codable {
 }
 
 /// Sent over Bluetooth between friends
-struct PNote: Codable { let i: String; let t: String; let ts: Int }
+struct PNote: Codable { let i: String; let t: String; let ts: Int; var c: String? = nil }
 struct Wire: Codable {
     let id: String          // sender id
     let n: String           // sender name
     let k: String           // proof: the receiver's own secret token
     let m: [PNote]          // sender's shared notes
+    var s: Int? = nil       // sender's score
 }
 
 private struct Saved: Codable {
@@ -57,6 +69,7 @@ private struct Saved: Codable {
     var myToken: String
     var myNotes: [Note]
     var friends: [Friend]
+    var myScore: Int? = nil
 }
 
 enum ImportResult { case ok, own, invalid }
@@ -73,6 +86,7 @@ final class BoardStore: ObservableObject {
     @Published var myName: String
     @Published var myToken: String
     @Published var myNotes: [Note]
+    @Published var myScore: Int
     @Published var friends: [String: Friend]
 
     /// Called whenever MY shared data changed -> BluetoothManager pushes it to friends
@@ -82,18 +96,19 @@ final class BoardStore: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: key),
            let s = try? JSONDecoder().decode(Saved.self, from: data) {
             myId = s.myId; myName = s.myName; myToken = s.myToken; myNotes = s.myNotes
+            myScore = s.myScore ?? 0
             friends = Dictionary(s.friends.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         } else {
             myId = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16)).lowercased()
             myToken = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16)).lowercased()
-            myName = "Player"; myNotes = []; friends = [:]
+            myName = "Player"; myNotes = []; myScore = 0; friends = [:]
         }
         save()
     }
 
     private func save() {
         let s = Saved(myId: myId, myName: myName, myToken: myToken,
-                      myNotes: myNotes, friends: Array(friends.values))
+                      myNotes: myNotes, friends: Array(friends.values), myScore: myScore)
         if let data = try? JSONEncoder().encode(s) { UserDefaults.standard.set(data, forKey: key) }
     }
 
@@ -111,6 +126,23 @@ final class BoardStore: ObservableObject {
         myNotes.append(Note(id: "\(myId)-\(ts)", text: t, ts: ts, shared: true))
         save()
         onChange?()                              // -> appears on friends' boards live
+    }
+
+    /// Called from the Challenge page when a challenge is finished:
+    /// +5 points and a "Yay! <me> did the <challenge>" notification on every friend's board.
+    func completeChallenge(_ name: String) {
+        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        let ts = Int(Date().timeIntervalSince1970 * 1_000_000)
+        myNotes.append(Note(id: "\(myId)-\(ts)", text: "Did the \(title) challenge",
+                            ts: ts, shared: true, challenge: title))
+        myScore += Points.perChallenge
+        save()
+        onChange?()
+    }
+
+    var myChallengeNotes: [Note] {
+        myNotes.filter { $0.challenge != nil }.sorted { $0.ts > $1.ts }
     }
 
     func toggleShare(_ note: Note) {
@@ -147,16 +179,17 @@ final class BoardStore: ObservableObject {
     /// My name + all my shared notes. `proof` = the friend's secret token (from his QR).
     func wireData(proof: String) -> Data? {
         let shared = myNotes.filter(\.shared).sorted { $0.ts > $1.ts }
-            .map { PNote(i: $0.id, t: $0.text, ts: $0.ts) }
-        return try? JSONEncoder().encode(Wire(id: myId, n: myName, k: proof, m: shared))
+            .map { PNote(i: $0.id, t: $0.text, ts: $0.ts, c: $0.challenge) }
+        return try? JSONEncoder().encode(Wire(id: myId, n: myName, k: proof, m: shared, s: myScore))
     }
 
     /// A connected friend sent his current shared notes -> replace what we have.
     func applyRemote(_ w: Wire) {
         guard var f = friends[w.id] else { return }          // only saved friends
         f.name = w.n
-        f.notes = Dictionary(w.m.map { ($0.i, Note(id: $0.i, text: $0.t, ts: $0.ts, shared: true)) },
+        f.notes = Dictionary(w.m.map { ($0.i, Note(id: $0.i, text: $0.t, ts: $0.ts, shared: true, challenge: $0.c)) },
                              uniquingKeysWith: { a, _ in a })
+        f.score = w.s
         friends[w.id] = f
         save()
     }
@@ -557,6 +590,7 @@ struct BoardView: View {
     @State private var showMyCode = false
     @State private var toast: String?
     @State private var message = ""
+    @State private var selectedId = "me"      // "me" or a friend id
 
     var body: some View {
         ZStack {
@@ -581,24 +615,85 @@ struct BoardView: View {
                         .padding(.horizontal)
                 }
 
-                if store.friends.isEmpty {
-                    Spacer()
-                    VStack(spacing: 10) {
-                        Image(systemName: "lock.fill").font(.system(size: 36)).foregroundColor(.boardGold)
-                        Text("Scan a friend's code (and let him scan yours)\nto see their messages live")
-                            .multilineTextAlignment(.center)
-                            .foregroundColor(.boardCream)
-                    }
-                    Spacer()
-                } else {
-                    ScrollView {
-                        VStack(spacing: 12) {
-                            ForEach(store.friends.values.sorted { $0.name < $1.name }) { f in
-                                FriendCard(friend: f, online: peers.online.contains(f.id))
+                // 1) PLAYERS ROW (top) - tap a player to see his achievements
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        Button { selectedId = "me" } label: {
+                            PlayerChip(name: store.myName, score: store.myScore,
+                                       online: nil, selected: selectedFriend == nil)
+                        }
+                        ForEach(sortedFriends) { f in
+                            Button { selectedId = f.id } label: {
+                                PlayerChip(name: f.name, score: f.score ?? 0,
+                                           online: peers.online.contains(f.id),
+                                           selected: selectedFriend?.id == f.id)
                             }
                         }
-                        .padding()
                     }
+                    .padding(.horizontal)
+                }
+                .buttonStyle(.plain)
+                .frame(height: 118)
+
+                // 2) SELECTED PLAYER'S CHALLENGE ACHIEVEMENTS
+                ScrollView {
+                    VStack(spacing: 12) {
+                        if let f = selectedFriend {
+                            AchievementsCard(name: f.name, isMe: false, score: f.score ?? 0,
+                                             notes: f.sortedNotes.filter { $0.challenge != nil })
+                        } else {
+                            AchievementsCard(name: store.myName, isMe: true, score: store.myScore,
+                                             notes: store.myChallengeNotes)
+                        }
+                        if store.friends.isEmpty {
+                            VStack(spacing: 8) {
+                                Image(systemName: "lock.fill").font(.system(size: 28)).foregroundColor(.boardGold)
+                                Text("Scan a friend's code (and let him scan yours)\nto see their progress live")
+                                    .font(.footnote)
+                                    .multilineTextAlignment(.center)
+                                    .foregroundColor(.boardCream)
+                            }
+                            .padding(.top, 8)
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 4)
+                }
+
+                // 3) CHAT (bottom)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Chat")
+                        .font(.headline)
+                        .foregroundColor(.boardCream)
+                        .padding(.horizontal)
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(spacing: 6) {
+                                if chat.isEmpty {
+                                    Text("No messages yet")
+                                        .font(.footnote)
+                                        .foregroundColor(Color.boardCream.opacity(0.8))
+                                        .padding(.top, 20)
+                                }
+                                ForEach(chat) { m in
+                                    ChatBubble(msg: m).id(m.id)
+                                }
+                            }
+                            .padding(8)
+                        }
+                        .onAppear {
+                            if let last = chat.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                        }
+                        .onChange(of: chat.count) { _ in
+                            if let last = chat.last {
+                                withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                            }
+                        }
+                    }
+                    .frame(height: 170)
+                    .background(Color.black.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .padding(.horizontal)
                 }
 
                 // Write a message: goes straight to every connected friend's board
@@ -653,6 +748,125 @@ struct BoardView: View {
         store.addNote(message)
         message = ""
     }
+
+    /// nil = I am selected
+    private var selectedFriend: Friend? {
+        selectedId == "me" ? nil : store.friends[selectedId]
+    }
+
+    private var sortedFriends: [Friend] {
+        store.friends.values.sorted { ($0.score ?? 0, $1.name) > ($1.score ?? 0, $0.name) }
+    }
+
+    /// All normal messages (mine + friends'), oldest first. Challenge notifications are not chat.
+    private var chat: [ChatMsg] {
+        var out: [ChatMsg] = store.myNotes
+            .filter { $0.challenge == nil }
+            .map { ChatMsg(id: $0.id, sender: store.myName, text: $0.text, ts: $0.ts, mine: true) }
+        for f in store.friends.values {
+            for n in f.notes.values where n.challenge == nil {
+                out.append(ChatMsg(id: n.id, sender: f.name, text: n.text, ts: n.ts, mine: false))
+            }
+        }
+        return out.sorted { $0.ts < $1.ts }
+    }
+}
+
+struct ChatMsg: Identifiable {
+    let id: String
+    let sender: String
+    let text: String
+    let ts: Int
+    let mine: Bool
+}
+
+struct ChatBubble: View {
+    let msg: ChatMsg
+    var body: some View {
+        HStack {
+            if msg.mine { Spacer(minLength: 40) }
+            VStack(alignment: .leading, spacing: 2) {
+                if !msg.mine {
+                    Text(msg.sender).font(.caption2.bold()).foregroundColor(.boardBrown.opacity(0.7))
+                }
+                Text(msg.text).foregroundColor(.boardBrown)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(msg.mine ? Color.boardGold : Color.boardCream)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            if !msg.mine { Spacer(minLength: 40) }
+        }
+    }
+}
+
+/// One player in the top row (avatar + name + score)
+struct PlayerChip: View {
+    let name: String
+    let score: Int
+    let online: Bool?        // nil for me
+    let selected: Bool
+    var body: some View {
+        VStack(spacing: 4) {
+            ZStack(alignment: .bottomTrailing) {
+                Text(String(name.prefix(1)).uppercased())
+                    .font(.title2.bold())
+                    .foregroundColor(.boardBrown)
+                    .frame(width: 58, height: 58)
+                    .background(Color.boardCream)
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(selected ? Color.boardGold : Color.clear, lineWidth: 4))
+                if let o = online {
+                    Circle()
+                        .fill(o ? Color.green : Color.gray)
+                        .frame(width: 14, height: 14)
+                        .overlay(Circle().stroke(Color.boardBg, lineWidth: 2))
+                }
+            }
+            Text(name)
+                .font(.caption.bold())
+                .foregroundColor(.boardCream)
+                .lineLimit(1)
+            ScorePill(score: score).scaleEffect(0.8)
+        }
+        .frame(width: 80)
+        .opacity(selected ? 1 : 0.75)
+    }
+}
+
+/// Challenge achievements of the selected player
+struct AchievementsCard: View {
+    let name: String
+    let isMe: Bool
+    let score: Int
+    let notes: [Note]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(isMe ? "\(name) (You)" : name).font(.title3.bold()).foregroundColor(.boardBrown)
+                Spacer()
+                ScorePill(score: score)
+            }
+            Text("\(notes.count) challenge\(notes.count == 1 ? "" : "s") completed")
+                .font(.caption)
+                .foregroundColor(.boardBrown)
+            Divider()
+            if notes.isEmpty {
+                Text(isMe ? "No challenges yet. Open the treasure to start!"
+                          : "\(name) hasn't finished any challenge yet")
+                    .foregroundColor(.boardBrown)
+            }
+            ForEach(notes) { n in
+                if let c = n.challenge {
+                    ChallengeNoteRow(who: name, challenge: c)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(Color.boardCream)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
 }
 
 struct FriendCard: View {
@@ -669,13 +883,80 @@ struct FriendCard: View {
                     .font(.caption)
                     .foregroundColor(.boardBrown)
                 Spacer()
+                ScorePill(score: friend.score ?? 0)
             }
             Divider()
             if friend.notes.isEmpty {
                 Text("No shared messages yet").foregroundColor(.boardBrown)
             }
             ForEach(friend.sortedNotes) { n in
-                Text("• \(n.text)").foregroundColor(.boardBrown)
+                if let c = n.challenge {
+                    ChallengeNoteRow(who: friend.name, challenge: c)
+                } else {
+                    Text("• \(n.text)").foregroundColor(.boardBrown)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(Color.boardCream)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+struct ScorePill: View {
+    let score: Int
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "star.fill")
+            Text("\(score)")
+        }
+        .font(.subheadline.bold())
+        .foregroundColor(.boardBrown)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(Color.boardGold)
+        .clipShape(Capsule())
+    }
+}
+
+/// "Yay! Hanna did the Smile challenge!  +5"
+struct ChallengeNoteRow: View {
+    let who: String
+    let challenge: String
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text("🎉")
+            Text("Yay! \(who) did the \(challenge) challenge!")
+                .foregroundColor(.boardBrown)
+            Spacer(minLength: 4)
+            Text("+\(Points.perChallenge)")
+                .font(.caption.bold())
+                .foregroundColor(.boardBrown)
+        }
+    }
+}
+
+/// My own card at the top of the board: my score + my finished challenges
+struct MyActivityCard: View {
+    let name: String
+    let score: Int
+    let notes: [Note]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("\(name) (You)").font(.title3.bold()).foregroundColor(.boardBrown)
+                Spacer()
+                ScorePill(score: score)
+            }
+            Divider()
+            if notes.isEmpty {
+                Text("No challenges yet. Open the treasure to start!").foregroundColor(.boardBrown)
+            }
+            ForEach(notes.prefix(10)) { n in
+                if let c = n.challenge {
+                    ChallengeNoteRow(who: name, challenge: c)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
