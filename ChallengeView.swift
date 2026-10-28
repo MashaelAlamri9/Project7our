@@ -30,6 +30,7 @@ final class ChallengeViewModel: ObservableObject {
     @Published var current: Challenge? = nil
     @Published var isOpen: Bool = false
     @Published private(set) var isBusy: Bool = false
+    @Published var showPoints: Bool = false     // "+5" popup
 
     private let key = "completedChallengeIDs"
     // التحديات المنجزة (✓) ما ترجع أبداً
@@ -69,7 +70,11 @@ final class ChallengeViewModel: ObservableObject {
     func shuffle() { swapChallenge(markDone: false, reopen: true) }
 
     /// زر ✓: يعتبر التحدي منجز وما يطلع مرة ثانية
-    func done() { swapChallenge(markDone: true, reopen: false) }
+    /// (لازم يكون الصندوق مفتوح، يعني شاف التحدي)
+    func done() {
+        guard isOpen else { return }
+        swapChallenge(markDone: true, reopen: false)
+    }
 
     private func swapChallenge(markDone: Bool, reopen: Bool) {
         guard !isBusy else { return }
@@ -78,7 +83,16 @@ final class ChallengeViewModel: ObservableObject {
         withAnimation(.easeIn(duration: 0.3)) { isOpen = false }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [self] in
-            if markDone, let c = current { completed.insert(c.id) }
+            if markDone, let c = current {
+                completed.insert(c.id)
+                // +5 نقاط + إشعار على الـ Board ("Yay! ... did the ...")
+                let name = c.name
+                Task { @MainActor in BoardStore.shared.completeChallenge(name) }
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) { showPoints = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [self] in
+                    withAnimation(.easeOut(duration: 0.3)) { showPoints = false }
+                }
+            }
             pickNext()
             if wasOpen && reopen && current != nil {
                 withAnimation(.spring(response: 0.6, dampingFraction: 0.65)) { isOpen = true }
@@ -93,6 +107,9 @@ final class ChallengeViewModel: ObservableObject {
 struct ChallengeView: View {
     @StateObject private var vm = ChallengeViewModel()
     @Environment(\.dismiss) private var dismiss   // زر X يقفل الصفحة
+    /// Optional: pass this if ChallengeView is NOT presented as a sheet / pushed screen
+    /// (e.g. you switch screens with a @State), so the Back button can return to the Board.
+    var onBack: (() -> Void)? = nil
     @State private var float = false
 
     private let gold = Color(red: 0.93, green: 0.76, blue: 0.30)
@@ -100,6 +117,10 @@ struct ChallengeView: View {
     // مواضع ثابتة: الصندوق ينزل 8 نقاط تحت منتصف سطح الرمل فيبان واقف عليه
     private let chestBottomY: CGFloat = 410
     private var sandY: CGFloat { chestBottomY - 90 }
+
+    private func goBack() {
+        if let onBack { onBack() } else { dismiss() }
+    }
 
     private var titleText: String {
         guard let c = vm.current else { return "The challenges are over🎉" }
@@ -138,9 +159,9 @@ struct ChallengeView: View {
                     // ظل الصندوق على الرمل (يخليه ملزوق بالأرض)
                     Ellipse()
                         .fill(Color.black.opacity(0.22))
-                        .frame(width: 200, height: 30)
+                        .frame(width: 190, height: 28)
                         .blur(radius: 4)
-                        .offset(x: 26, y: chestBottomY - 20 - 15)
+                        .offset(x: 0, y: chestBottomY - 20 - 15)
 
                     ZStack(alignment: .bottom) {
                         // الورقة تطلع من الصندوق
@@ -149,13 +170,12 @@ struct ChallengeView: View {
                             .offset(y: vm.isOpen ? -150 : 0)
                             .opacity(vm.isOpen ? 1 : 0)
 
-                        // حجم الصندوق: غيّر الرقم 1.5 لو تبيه أكبر أو أصغر
+                        // حجم الصندوق: غيّر الرقم 1.35 لو تبيه أكبر أو أصغر
                         ChestView(isOpen: vm.isOpen)
-                            .scaleEffect(1.5, anchor: .bottom)
+                            .scaleEffect(1.35, anchor: .bottom)
                             .onTapGesture { vm.openChest() }
                     }
-                    .frame(height: chestBottomY)
-                    .offset(x: 26)   // نزّلته شوي لليمين عشان النخلة تبان
+                    .frame(height: chestBottomY)   // الصندوق بالنص بالضبط
                 }
                 .frame(height: chestBottomY + 70)
                 .offset(y: float ? -6 : 6)
@@ -172,10 +192,36 @@ struct ChallengeView: View {
                     Spacer()
                     RoundIconButton(systemName: "shuffle") { vm.shuffle() }
                     Spacer()
-                    RoundIconButton(systemName: "xmark") { dismiss() }
+                    RoundIconButton(systemName: "xmark") { goBack() }
                 }
                 .padding(.horizontal, 28)
                 .padding(.bottom, 36)
+            }
+        }
+        // زر الرجوع للـ Board (أعلى اليسار)
+        .overlay(alignment: .topLeading) {
+            Button { goBack() } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.left").font(.system(size: 16, weight: .bold))
+                    Text("Board").font(.system(size: 17, weight: .semibold))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(Capsule().fill(Color(red: 0.55, green: 0.33, blue: 0.25)))
+                .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 2))
+                .shadow(color: .black.opacity(0.25), radius: 4, y: 3)
+            }
+            .padding(.leading, 16)
+            .padding(.top, 8)
+        }
+        .overlay {
+            if vm.showPoints {
+                Text("+\(Points.perChallenge) ⭐")
+                    .font(.system(size: 54, weight: .heavy, design: .rounded))
+                    .foregroundColor(gold)
+                    .shadow(color: .black.opacity(0.3), radius: 4, y: 3)
+                    .transition(.scale.combined(with: .opacity))
             }
         }
         .onAppear { float = true }
@@ -225,7 +271,9 @@ struct ChestView: View {
     private let coin = Color(red: 0.99, green: 0.80, blue: 0.20)
 
     var body: some View {
-        VStack(spacing: 0) {
+        // الترتيب: الغطا (ورا) ← العملات ← جسم الصندوق (قدام)
+        // عشان العملات تطلع من فتحة الصندوق وتنقص بالجزء السفلي ورا الواجهة
+        ZStack(alignment: .top) {
             // الغطا
             RoundedRectangle(cornerRadius: 18)
                 .fill(brown)
@@ -237,9 +285,23 @@ struct ChestView: View {
                                   axis: (x: 1, y: 0, z: 0),
                                   anchor: .bottom,
                                   perspective: 0.4)
-                .zIndex(1)
 
-            // جسم الصندوق
+            // العملات (تظهر لما ينفتح)
+            ZStack {
+                ForEach(Array(coinSpots.enumerated()), id: \.offset) { i, p in
+                    coinView
+                        .offset(x: p.x, y: p.y - 11)      // p.y = مركز العملة من أعلى الصندوق
+                        .scaleEffect(isOpen ? 1 : 0.1)
+                        .animation(.spring(response: 0.5, dampingFraction: 0.5)
+                                    .delay(isOpen ? 0.05 * Double(i) : 0), value: isOpen)
+                }
+            }
+            .frame(width: 150, height: 44, alignment: .top)
+            .opacity(isOpen ? 1 : 0)
+            .animation(.easeOut(duration: 0.2), value: isOpen)
+            .allowsHitTesting(false)
+
+            // جسم الصندوق (يغطي نصف العملات السفلي)
             RoundedRectangle(cornerRadius: 6)
                 .fill(brown)
                 .overlay(bands)
@@ -252,30 +314,25 @@ struct ChestView: View {
                         .offset(y: -2)
                 }
                 .frame(width: 150, height: 80)
+                .offset(y: 44)
         }
-        .frame(width: 150, height: 124)
-        // العملات تظهر لما ينفتح
-        .overlay(alignment: .top) {
-            ZStack {
-                ForEach(Array(coinSpots.enumerated()), id: \.offset) { i, p in
-                    Circle()
-                        .fill(coin)
-                        .overlay(Circle().stroke(Color.orange.opacity(0.6), lineWidth: 1.5))
-                        .frame(width: 22, height: 22)
-                        .offset(x: p.x, y: p.y)
-                        .scaleEffect(isOpen ? 1 : 0.1)
-                        .animation(.spring(response: 0.5, dampingFraction: 0.5).delay(0.05 * Double(i)), value: isOpen)
-                }
-            }
-            .opacity(isOpen ? 1 : 0)
-            .offset(y: 38)
-            .allowsHitTesting(false)
-        }
+        .frame(width: 150, height: 124, alignment: .top)
     }
 
+    private var coinView: some View {
+        Circle()
+            .fill(coin)
+            .overlay(Circle().stroke(Color.orange.opacity(0.6), lineWidth: 1.5))
+            .overlay(Circle().stroke(Color.orange.opacity(0.35), lineWidth: 1).padding(4))
+            .frame(width: 22, height: 22)
+    }
+
+    // مراكز العملات (x من منتصف الصندوق، y من أعلى الصندوق). خط الحافة = 44
+    // الصف الخلفي أول، بعدين الأمامي فوقه — كومة مرتبة داخل الصندوق
     private var coinSpots: [CGPoint] {
-        [CGPoint(x: -44, y: 0), CGPoint(x: -22, y: -8), CGPoint(x: 0, y: -12),
-         CGPoint(x: 22, y: -6), CGPoint(x: 44, y: 0), CGPoint(x: -10, y: 2), CGPoint(x: 12, y: 3)]
+        [CGPoint(x: -30, y: 30), CGPoint(x: -10, y: 25), CGPoint(x: 12, y: 26), CGPoint(x: 32, y: 30),
+         CGPoint(x: -46, y: 38), CGPoint(x: -22, y: 36), CGPoint(x: 0, y: 34),
+         CGPoint(x: 22, y: 36), CGPoint(x: 46, y: 38)]
     }
 
     private var bands: some View {
@@ -333,7 +390,7 @@ struct ChallengeIslandView: View {
             // النخلة
             ChallengePalmTree()
                 .scaleEffect(1.3, anchor: UnitPoint(x: 45.0 / 120.0, y: 100.0 / 110.0))
-                .offset(x: -95, y: -43)
+                .offset(x: -112, y: -43)   // النخلة على طرف الجزيرة عشان الصندوق يكون بالنص
         }
         .frame(width: 340, height: 150)
         .onAppear {
